@@ -1,0 +1,780 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="486" onload="init(evt)" viewBox="0 0 1200 486" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+	}
+
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+		}
+		else if (e.target.id == "unzoom") unzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+	}, false)
+
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+		return;
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) {
+				currentSearchTerm = term;
+				search();
+			}
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (currentSearchTerm === null) return;
+		var term = currentSearchTerm;
+
+		var re = new RegExp(term, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="486.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="469" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="469" > </text>
+<g id="frames">
+<g >
+<title>pty_write (12 samples, 19.05%)</title><rect x="309.7" y="293" width="224.7" height="15.0" fill="rgb(240,180,38)" rx="2" ry="2" />
+<text  x="312.68" y="303.5" >pty_write</text>
+</g>
+<g >
+<title>sys_exit_group (3 samples, 4.76%)</title><rect x="1133.8" y="389" width="56.2" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="1136.81" y="399.5" >sys_e..</text>
+</g>
+<g >
+<title>call_softirq (12 samples, 19.05%)</title><rect x="852.9" y="293" width="224.7" height="15.0" fill="rgb(239,112,37)" rx="2" ry="2" />
+<text  x="855.86" y="303.5" >call_softirq</text>
+</g>
+<g >
+<title>delayed_work_timer_fn (12 samples, 19.05%)</title><rect x="852.9" y="229" width="224.7" height="15.0" fill="rgb(244,219,42)" rx="2" ry="2" />
+<text  x="855.86" y="239.5" >delayed_work_timer_fn</text>
+</g>
+<g >
+<title>sys_write (27 samples, 42.86%)</title><rect x="28.7" y="357" width="505.7" height="15.0" fill="rgb(240,167,38)" rx="2" ry="2" />
+<text  x="31.73" y="367.5" >sys_write</text>
+</g>
+<g >
+<title>tty_write (27 samples, 42.86%)</title><rect x="28.7" y="325" width="505.7" height="15.0" fill="rgb(240,148,38)" rx="2" ry="2" />
+<text  x="31.73" y="335.5" >tty_write</text>
+</g>
+<g >
+<title>insert_work (12 samples, 19.05%)</title><rect x="309.7" y="213" width="224.7" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="312.68" y="223.5" >insert_work</text>
+</g>
+<g >
+<title>__wake_up (12 samples, 19.05%)</title><rect x="628.1" y="181" width="224.8" height="15.0" fill="rgb(236,119,34)" rx="2" ry="2" />
+<text  x="631.10" y="191.5" >__wake_up</text>
+</g>
+<g >
+<title>rsp_wakeup (12 samples, 19.05%)</title><rect x="628.1" y="197" width="224.8" height="15.0" fill="rgb(240,159,38)" rx="2" ry="2" />
+<text  x="631.10" y="207.5" >rsp_wakeup</text>
+</g>
+<g >
+<title>__wake_up_common_lock (12 samples, 19.05%)</title><rect x="628.1" y="165" width="224.8" height="15.0" fill="rgb(240,119,39)" rx="2" ry="2" />
+<text  x="631.10" y="175.5" >__wake_up_common_lock</text>
+</g>
+<g >
+<title>irq_work_run (12 samples, 19.05%)</title><rect x="628.1" y="229" width="224.8" height="15.0" fill="rgb(243,153,41)" rx="2" ry="2" />
+<text  x="631.10" y="239.5" >irq_work_run</text>
+</g>
+<g >
+<title>irq_work_run_list (12 samples, 19.05%)</title><rect x="628.1" y="213" width="224.8" height="15.0" fill="rgb(232,153,30)" rx="2" ry="2" />
+<text  x="631.10" y="223.5" >irq_work_run_list</text>
+</g>
+<g >
+<title>retint_careful (1 samples, 1.59%)</title><rect x="534.4" y="389" width="18.8" height="15.0" fill="rgb(229,162,26)" rx="2" ry="2" />
+<text  x="537.44" y="399.5" ></text>
+</g>
+<g >
+<title>schedule_user (1 samples, 1.59%)</title><rect x="10.0" y="357" width="18.7" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" ></text>
+</g>
+<g >
+<title>enqueue_task_fair (12 samples, 19.05%)</title><rect x="28.7" y="85" width="224.8" height="15.0" fill="rgb(240,205,39)" rx="2" ry="2" />
+<text  x="31.73" y="95.5" >enqueue_task_fair</text>
+</g>
+<g >
+<title>n_tty_write (27 samples, 42.86%)</title><rect x="28.7" y="309" width="505.7" height="15.0" fill="rgb(240,168,38)" rx="2" ry="2" />
+<text  x="31.73" y="319.5" >n_tty_write</text>
+</g>
+<g >
+<title>wake_up_process (12 samples, 19.05%)</title><rect x="28.7" y="149" width="224.8" height="15.0" fill="rgb(237,77,35)" rx="2" ry="2" />
+<text  x="31.73" y="159.5" >wake_up_process</text>
+</g>
+<g >
+<title>start_thread (24 samples, 38.10%)</title><rect x="628.1" y="405" width="449.5" height="15.0" fill="rgb(241,156,40)" rx="2" ry="2" />
+<text  x="631.10" y="415.5" >start_thread</text>
+</g>
+<g >
+<title>default_wake_function (12 samples, 19.05%)</title><rect x="628.1" y="117" width="224.8" height="15.0" fill="rgb(247,200,46)" rx="2" ry="2" />
+<text  x="631.10" y="127.5" >default_wake_function</text>
+</g>
+<g >
+<title>safe_increment (4 samples, 6.35%)</title><rect x="553.2" y="405" width="74.9" height="15.0" fill="rgb(241,125,39)" rx="2" ry="2" />
+<text  x="556.17" y="415.5" >safe_inc..</text>
+</g>
+<g >
+<title>__cond_resched (3 samples, 4.76%)</title><rect x="253.5" y="245" width="56.2" height="15.0" fill="rgb(247,144,46)" rx="2" ry="2" />
+<text  x="256.49" y="255.5" >__con..</text>
+</g>
+<g >
+<title>pthread_mutex_unlock (1 samples, 1.59%)</title><rect x="534.4" y="405" width="18.8" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="537.44" y="415.5" ></text>
+</g>
+<g >
+<title>lock_scaling_ht (63 samples, 100.00%)</title><rect x="10.0" y="421" width="1180.0" height="15.0" fill="rgb(231,151,29)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" >lock_scaling_ht</text>
+</g>
+<g >
+<title>system_call_fastpath (6 samples, 9.52%)</title><rect x="1077.6" y="405" width="112.4" height="15.0" fill="rgb(240,167,39)" rx="2" ry="2" />
+<text  x="1080.62" y="415.5" >system_call_f..</text>
+</g>
+<g >
+<title>enqueue_entity (12 samples, 19.05%)</title><rect x="628.1" y="37" width="224.8" height="15.0" fill="rgb(240,205,38)" rx="2" ry="2" />
+<text  x="631.10" y="47.5" >enqueue_entity</text>
+</g>
+<g >
+<title>sys_exit (3 samples, 4.76%)</title><rect x="1077.6" y="389" width="56.2" height="15.0" fill="rgb(237,167,36)" rx="2" ry="2" />
+<text  x="1080.62" y="399.5" >sys_e..</text>
+</g>
+<g >
+<title>mutex_lock (3 samples, 4.76%)</title><rect x="253.5" y="277" width="56.2" height="15.0" fill="rgb(240,96,39)" rx="2" ry="2" />
+<text  x="256.49" y="287.5" >mutex..</text>
+</g>
+<g >
+<title>run (24 samples, 38.10%)</title><rect x="628.1" y="389" width="449.5" height="15.0" fill="rgb(243,156,41)" rx="2" ry="2" />
+<text  x="631.10" y="399.5" >run</text>
+</g>
+<g >
+<title>activate_task (12 samples, 19.05%)</title><rect x="628.1" y="69" width="224.8" height="15.0" fill="rgb(236,148,34)" rx="2" ry="2" />
+<text  x="631.10" y="79.5" >activate_task</text>
+</g>
+<g >
+<title>_cond_resched (3 samples, 4.76%)</title><rect x="253.5" y="261" width="56.2" height="15.0" fill="rgb(247,180,46)" rx="2" ry="2" />
+<text  x="256.49" y="271.5" >_cond..</text>
+</g>
+<g >
+<title>__queue_work (12 samples, 19.05%)</title><rect x="309.7" y="229" width="224.7" height="15.0" fill="rgb(236,138,34)" rx="2" ry="2" />
+<text  x="312.68" y="239.5" >__queue_work</text>
+</g>
+<g >
+<title>enqueue_task_fair (12 samples, 19.05%)</title><rect x="852.9" y="101" width="224.7" height="15.0" fill="rgb(240,205,39)" rx="2" ry="2" />
+<text  x="855.86" y="111.5" >enqueue_task_fair</text>
+</g>
+<g >
+<title>process_output (15 samples, 23.81%)</title><rect x="28.7" y="293" width="281.0" height="15.0" fill="rgb(234,184,31)" rx="2" ry="2" />
+<text  x="31.73" y="303.5" >process_output</text>
+</g>
+<g >
+<title>insert_work (12 samples, 19.05%)</title><rect x="852.9" y="197" width="224.7" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="855.86" y="207.5" >insert_work</text>
+</g>
+<g >
+<title>__schedule (3 samples, 4.76%)</title><rect x="253.5" y="229" width="56.2" height="15.0" fill="rgb(237,132,35)" rx="2" ry="2" />
+<text  x="256.49" y="239.5" >__sch..</text>
+</g>
+<g >
+<title>do_softirq (12 samples, 19.05%)</title><rect x="628.1" y="325" width="224.8" height="15.0" fill="rgb(239,189,37)" rx="2" ry="2" />
+<text  x="631.10" y="335.5" >do_softirq</text>
+</g>
+<g >
+<title>__wake_up_common (12 samples, 19.05%)</title><rect x="628.1" y="149" width="224.8" height="15.0" fill="rgb(253,119,53)" rx="2" ry="2" />
+<text  x="631.10" y="159.5" >__wake_up_common</text>
+</g>
+<g >
+<title>irq_exit (12 samples, 19.05%)</title><rect x="852.9" y="325" width="224.7" height="15.0" fill="rgb(237,153,36)" rx="2" ry="2" />
+<text  x="855.86" y="335.5" >irq_exit</text>
+</g>
+<g >
+<title>call_softirq (12 samples, 19.05%)</title><rect x="628.1" y="309" width="224.8" height="15.0" fill="rgb(239,112,37)" rx="2" ry="2" />
+<text  x="631.10" y="319.5" >call_softirq</text>
+</g>
+<g >
+<title>queue_work_on (12 samples, 19.05%)</title><rect x="309.7" y="245" width="224.7" height="15.0" fill="rgb(246,154,45)" rx="2" ry="2" />
+<text  x="312.68" y="255.5" >queue_work_on</text>
+</g>
+<g >
+<title>activate_task (12 samples, 19.05%)</title><rect x="28.7" y="101" width="224.8" height="15.0" fill="rgb(236,148,34)" rx="2" ry="2" />
+<text  x="31.73" y="111.5" >activate_task</text>
+</g>
+<g >
+<title>[unknown] (28 samples, 44.44%)</title><rect x="10.0" y="405" width="524.4" height="15.0" fill="rgb(242,180,40)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" >[unknown]</text>
+</g>
+<g >
+<title>irq_work_interrupt (12 samples, 19.05%)</title><rect x="628.1" y="261" width="224.8" height="15.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="631.10" y="271.5" >irq_work_interrupt</text>
+</g>
+<g >
+<title>safe_increment (12 samples, 19.05%)</title><rect x="852.9" y="373" width="224.7" height="15.0" fill="rgb(241,125,39)" rx="2" ry="2" />
+<text  x="855.86" y="383.5" >safe_increment</text>
+</g>
+<g >
+<title>do_output_char (12 samples, 19.05%)</title><rect x="28.7" y="277" width="224.8" height="15.0" fill="rgb(232,189,30)" rx="2" ry="2" />
+<text  x="31.73" y="287.5" >do_output_char</text>
+</g>
+<g >
+<title>try_to_wake_up (12 samples, 19.05%)</title><rect x="852.9" y="149" width="224.7" height="15.0" fill="rgb(236,158,34)" rx="2" ry="2" />
+<text  x="855.86" y="159.5" >try_to_wake_up</text>
+</g>
+<g >
+<title>__GI___libc_write (28 samples, 44.44%)</title><rect x="10.0" y="389" width="524.4" height="15.0" fill="rgb(240,119,38)" rx="2" ry="2" />
+<text  x="13.00" y="399.5" >__GI___libc_write</text>
+</g>
+<g >
+<title>__schedule (1 samples, 1.59%)</title><rect x="10.0" y="341" width="18.7" height="15.0" fill="rgb(237,132,35)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" ></text>
+</g>
+<g >
+<title>wake_up_worker (12 samples, 19.05%)</title><rect x="852.9" y="181" width="224.7" height="15.0" fill="rgb(238,77,36)" rx="2" ry="2" />
+<text  x="855.86" y="191.5" >wake_up_worker</text>
+</g>
+<g >
+<title>try_to_wake_up (12 samples, 19.05%)</title><rect x="309.7" y="165" width="224.7" height="15.0" fill="rgb(236,158,34)" rx="2" ry="2" />
+<text  x="312.68" y="175.5" >try_to_wake_up</text>
+</g>
+<g >
+<title>__schedule (1 samples, 1.59%)</title><rect x="534.4" y="357" width="18.8" height="15.0" fill="rgb(237,132,35)" rx="2" ry="2" />
+<text  x="537.44" y="367.5" ></text>
+</g>
+<g >
+<title>ttwu_do_activate (12 samples, 19.05%)</title><rect x="852.9" y="133" width="224.7" height="15.0" fill="rgb(245,116,45)" rx="2" ry="2" />
+<text  x="855.86" y="143.5" >ttwu_do_activate</text>
+</g>
+<g >
+<title>queue_work_on (12 samples, 19.05%)</title><rect x="28.7" y="213" width="224.8" height="15.0" fill="rgb(246,154,45)" rx="2" ry="2" />
+<text  x="31.73" y="223.5" >queue_work_on</text>
+</g>
+<g >
+<title>ttwu_do_activate (12 samples, 19.05%)</title><rect x="309.7" y="149" width="224.7" height="15.0" fill="rgb(245,116,45)" rx="2" ry="2" />
+<text  x="312.68" y="159.5" >ttwu_do_activate</text>
+</g>
+<g >
+<title>ttwu_do_activate (12 samples, 19.05%)</title><rect x="628.1" y="85" width="224.8" height="15.0" fill="rgb(245,116,45)" rx="2" ry="2" />
+<text  x="631.10" y="95.5" >ttwu_do_activate</text>
+</g>
+<g >
+<title>try_to_wake_up (12 samples, 19.05%)</title><rect x="628.1" y="101" width="224.8" height="15.0" fill="rgb(236,158,34)" rx="2" ry="2" />
+<text  x="631.10" y="111.5" >try_to_wake_up</text>
+</g>
+<g >
+<title>wake_up_worker (12 samples, 19.05%)</title><rect x="28.7" y="165" width="224.8" height="15.0" fill="rgb(238,77,36)" rx="2" ry="2" />
+<text  x="31.73" y="175.5" >wake_up_worker</text>
+</g>
+<g >
+<title>tty_flip_buffer_push (12 samples, 19.05%)</title><rect x="309.7" y="277" width="224.7" height="15.0" fill="rgb(236,148,34)" rx="2" ry="2" />
+<text  x="312.68" y="287.5" >tty_flip_buffer_push</text>
+</g>
+<g >
+<title>system_call_fastpath (27 samples, 42.86%)</title><rect x="28.7" y="373" width="505.7" height="15.0" fill="rgb(240,167,39)" rx="2" ry="2" />
+<text  x="31.73" y="383.5" >system_call_fastpath</text>
+</g>
+<g >
+<title>enqueue_task_fair (12 samples, 19.05%)</title><rect x="628.1" y="53" width="224.8" height="15.0" fill="rgb(240,205,39)" rx="2" ry="2" />
+<text  x="631.10" y="63.5" >enqueue_task_fair</text>
+</g>
+<g >
+<title>do_exit (3 samples, 4.76%)</title><rect x="1077.6" y="373" width="56.2" height="15.0" fill="rgb(237,189,36)" rx="2" ry="2" />
+<text  x="1080.62" y="383.5" >do_exit</text>
+</g>
+<g >
+<title>__queue_work (12 samples, 19.05%)</title><rect x="28.7" y="197" width="224.8" height="15.0" fill="rgb(236,138,34)" rx="2" ry="2" />
+<text  x="31.73" y="207.5" >__queue_work</text>
+</g>
+<g >
+<title>activate_task (12 samples, 19.05%)</title><rect x="309.7" y="133" width="224.7" height="15.0" fill="rgb(236,148,34)" rx="2" ry="2" />
+<text  x="312.68" y="143.5" >activate_task</text>
+</g>
+<g >
+<title>smp_irq_work_interrupt (12 samples, 19.05%)</title><rect x="628.1" y="245" width="224.8" height="15.0" fill="rgb(236,126,34)" rx="2" ry="2" />
+<text  x="631.10" y="255.5" >smp_irq_work_interrupt</text>
+</g>
+<g >
+<title>smp_apic_timer_interrupt (12 samples, 19.05%)</title><rect x="852.9" y="341" width="224.7" height="15.0" fill="rgb(236,126,34)" rx="2" ry="2" />
+<text  x="855.86" y="351.5" >smp_apic_timer_interrupt</text>
+</g>
+<g >
+<title>tty_flip_buffer_push (12 samples, 19.05%)</title><rect x="28.7" y="245" width="224.8" height="15.0" fill="rgb(236,148,34)" rx="2" ry="2" />
+<text  x="31.73" y="255.5" >tty_flip_buffer_push</text>
+</g>
+<g >
+<title>__do_softirq (12 samples, 19.05%)</title><rect x="628.1" y="293" width="224.8" height="15.0" fill="rgb(239,141,37)" rx="2" ry="2" />
+<text  x="631.10" y="303.5" >__do_softirq</text>
+</g>
+<g >
+<title>wake_up_process (12 samples, 19.05%)</title><rect x="309.7" y="181" width="224.7" height="15.0" fill="rgb(237,77,35)" rx="2" ry="2" />
+<text  x="312.68" y="191.5" >wake_up_process</text>
+</g>
+<g >
+<title>schedule_user (1 samples, 1.59%)</title><rect x="534.4" y="373" width="18.8" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="537.44" y="383.5" ></text>
+</g>
+<g >
+<title>retint_careful (4 samples, 6.35%)</title><rect x="553.2" y="389" width="74.9" height="15.0" fill="rgb(229,162,26)" rx="2" ry="2" />
+<text  x="556.17" y="399.5" >retint_c..</text>
+</g>
+<g >
+<title>__queue_work (12 samples, 19.05%)</title><rect x="852.9" y="213" width="224.7" height="15.0" fill="rgb(236,138,34)" rx="2" ry="2" />
+<text  x="855.86" y="223.5" >__queue_work</text>
+</g>
+<g >
+<title>irq_exit (12 samples, 19.05%)</title><rect x="628.1" y="341" width="224.8" height="15.0" fill="rgb(237,153,36)" rx="2" ry="2" />
+<text  x="631.10" y="351.5" >irq_exit</text>
+</g>
+<g >
+<title>enqueue_entity (12 samples, 19.05%)</title><rect x="309.7" y="101" width="224.7" height="15.0" fill="rgb(240,205,38)" rx="2" ry="2" />
+<text  x="312.68" y="111.5" >enqueue_entity</text>
+</g>
+<g >
+<title>enqueue_entity (12 samples, 19.05%)</title><rect x="852.9" y="85" width="224.7" height="15.0" fill="rgb(240,205,38)" rx="2" ry="2" />
+<text  x="855.86" y="95.5" >enqueue_entity</text>
+</g>
+<g >
+<title>wake_up_worker (12 samples, 19.05%)</title><rect x="309.7" y="197" width="224.7" height="15.0" fill="rgb(238,77,36)" rx="2" ry="2" />
+<text  x="312.68" y="207.5" >wake_up_worker</text>
+</g>
+<g >
+<title>wake_up_process (12 samples, 19.05%)</title><rect x="852.9" y="165" width="224.7" height="15.0" fill="rgb(237,77,35)" rx="2" ry="2" />
+<text  x="855.86" y="175.5" >wake_up_process</text>
+</g>
+<g >
+<title>tty_schedule_flip (12 samples, 19.05%)</title><rect x="28.7" y="229" width="224.8" height="15.0" fill="rgb(244,148,43)" rx="2" ry="2" />
+<text  x="31.73" y="239.5" >tty_schedule_flip</text>
+</g>
+<g >
+<title>vfs_write (27 samples, 42.86%)</title><rect x="28.7" y="341" width="505.7" height="15.0" fill="rgb(240,128,38)" rx="2" ry="2" />
+<text  x="31.73" y="351.5" >vfs_write</text>
+</g>
+<g >
+<title>autoremove_wake_function (12 samples, 19.05%)</title><rect x="628.1" y="133" width="224.8" height="15.0" fill="rgb(247,112,46)" rx="2" ry="2" />
+<text  x="631.10" y="143.5" >autoremove_wake_function</text>
+</g>
+<g >
+<title>ttwu_do_activate (12 samples, 19.05%)</title><rect x="28.7" y="117" width="224.8" height="15.0" fill="rgb(245,116,45)" rx="2" ry="2" />
+<text  x="31.73" y="127.5" >ttwu_do_activate</text>
+</g>
+<g >
+<title>__schedule (4 samples, 6.35%)</title><rect x="553.2" y="357" width="74.9" height="15.0" fill="rgb(237,132,35)" rx="2" ry="2" />
+<text  x="556.17" y="367.5" >__schedule</text>
+</g>
+<g >
+<title>do_group_exit (3 samples, 4.76%)</title><rect x="1133.8" y="373" width="56.2" height="15.0" fill="rgb(237,189,36)" rx="2" ry="2" />
+<text  x="1136.81" y="383.5" >do_gr..</text>
+</g>
+<g >
+<title>run_timer_softirq (12 samples, 19.05%)</title><rect x="852.9" y="261" width="224.7" height="15.0" fill="rgb(239,156,37)" rx="2" ry="2" />
+<text  x="855.86" y="271.5" >run_timer_softirq</text>
+</g>
+<g >
+<title>do_softirq (12 samples, 19.05%)</title><rect x="852.9" y="309" width="224.7" height="15.0" fill="rgb(239,189,37)" rx="2" ry="2" />
+<text  x="855.86" y="319.5" >do_softirq</text>
+</g>
+<g >
+<title>activate_task (12 samples, 19.05%)</title><rect x="852.9" y="117" width="224.7" height="15.0" fill="rgb(236,148,34)" rx="2" ry="2" />
+<text  x="855.86" y="127.5" >activate_task</text>
+</g>
+<g >
+<title>pty_write (12 samples, 19.05%)</title><rect x="28.7" y="261" width="224.8" height="15.0" fill="rgb(240,180,38)" rx="2" ry="2" />
+<text  x="31.73" y="271.5" >pty_write</text>
+</g>
+<g >
+<title>enqueue_entity (12 samples, 19.05%)</title><rect x="28.7" y="69" width="224.8" height="15.0" fill="rgb(240,205,38)" rx="2" ry="2" />
+<text  x="31.73" y="79.5" >enqueue_entity</text>
+</g>
+<g >
+<title>do_exit (3 samples, 4.76%)</title><rect x="1133.8" y="357" width="56.2" height="15.0" fill="rgb(237,189,36)" rx="2" ry="2" />
+<text  x="1136.81" y="367.5" >do_exit</text>
+</g>
+<g >
+<title>apic_timer_interrupt (12 samples, 19.05%)</title><rect x="852.9" y="357" width="224.7" height="15.0" fill="rgb(236,134,34)" rx="2" ry="2" />
+<text  x="855.86" y="367.5" >apic_timer_interrupt</text>
+</g>
+<g >
+<title>all (63 samples, 100%)</title><rect x="10.0" y="437" width="1180.0" height="15.0" fill="rgb(255,230,55)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" ></text>
+</g>
+<g >
+<title>apic_timer_interrupt (12 samples, 19.05%)</title><rect x="628.1" y="373" width="224.8" height="15.0" fill="rgb(236,134,34)" rx="2" ry="2" />
+<text  x="631.10" y="383.5" >apic_timer_interrupt</text>
+</g>
+<g >
+<title>__do_softirq (12 samples, 19.05%)</title><rect x="852.9" y="277" width="224.7" height="15.0" fill="rgb(239,141,37)" rx="2" ry="2" />
+<text  x="855.86" y="287.5" >__do_softirq</text>
+</g>
+<g >
+<title>enqueue_task_fair (12 samples, 19.05%)</title><rect x="309.7" y="117" width="224.7" height="15.0" fill="rgb(240,205,39)" rx="2" ry="2" />
+<text  x="312.68" y="127.5" >enqueue_task_fair</text>
+</g>
+<g >
+<title>try_to_wake_up (12 samples, 19.05%)</title><rect x="28.7" y="133" width="224.8" height="15.0" fill="rgb(236,158,34)" rx="2" ry="2" />
+<text  x="31.73" y="143.5" >try_to_wake_up</text>
+</g>
+<g >
+<title>smp_apic_timer_interrupt (12 samples, 19.05%)</title><rect x="628.1" y="357" width="224.8" height="15.0" fill="rgb(236,126,34)" rx="2" ry="2" />
+<text  x="631.10" y="367.5" >smp_apic_timer_interrupt</text>
+</g>
+<g >
+<title>schedule_user (4 samples, 6.35%)</title><rect x="553.2" y="373" width="74.9" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="556.17" y="383.5" >schedule..</text>
+</g>
+<g >
+<title>sysret_careful (1 samples, 1.59%)</title><rect x="10.0" y="373" width="18.7" height="15.0" fill="rgb(229,167,26)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" ></text>
+</g>
+<g >
+<title>insert_work (12 samples, 19.05%)</title><rect x="28.7" y="181" width="224.8" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="31.73" y="191.5" >insert_work</text>
+</g>
+<g >
+<title>rcu_process_callbacks (12 samples, 19.05%)</title><rect x="628.1" y="277" width="224.8" height="15.0" fill="rgb(235,169,33)" rx="2" ry="2" />
+<text  x="631.10" y="287.5" >rcu_process_callbacks</text>
+</g>
+<g >
+<title>tty_schedule_flip (12 samples, 19.05%)</title><rect x="309.7" y="261" width="224.7" height="15.0" fill="rgb(244,148,43)" rx="2" ry="2" />
+<text  x="312.68" y="271.5" >tty_schedule_flip</text>
+</g>
+<g >
+<title>call_timer_fn (12 samples, 19.05%)</title><rect x="852.9" y="245" width="224.7" height="15.0" fill="rgb(244,112,42)" rx="2" ry="2" />
+<text  x="855.86" y="255.5" >call_timer_fn</text>
+</g>
+</g>
+</svg>
